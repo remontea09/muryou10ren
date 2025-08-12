@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>無料10連を開催中のソシャゲ一覧</title>
+  <meta name="description" content="今どのソシャゲが無料10連を開催中かをまとめて表示します">
+  <style>
+    :root {
+      --bg:#0f172a; --card:#111827; --muted:#94a3b8; --text:#e5e7eb; --brand:#22d3ee;
+      --ok:#22c55e; --warn:#f59e0b; --bad:#ef4444;
+    }
+    *{box-sizing:border-box}
+    body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,"Noto Sans JP",sans-serif;background:var(--bg);color:var(--text)}
+    a{color:inherit;text-decoration:none}
+    .wrap{max-width:1000px;margin:0 auto;padding:16px}
+    header{display:flex;flex-wrap:wrap;gap:12px;align-items:center;justify-content:space-between;margin-bottom:12px}
+    .title{font-weight:800;font-size:20px;letter-spacing:.5px}
+    .sub{color:var(--muted);font-size:12px}
+    .controls{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+    .search{padding:10px 12px;border-radius:10px;border:1px solid #334155;background:#0b1220;color:var(--text);min-width:220px}
+    .chip{display:inline-flex;align-items:center;gap:6px;border:1px solid #334155;padding:8px 10px;border-radius:999px;cursor:pointer;background:#0b1220}
+    .chip input{accent-color:var(--brand)}
+    .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:12px;margin-top:12px}
+    .card{background:var(--card);border:1px solid #1f2937;border-radius:16px;padding:14px;display:flex;flex-direction:column;gap:8px}
+    .top{display:flex;align-items:center;gap:8px;justify-content:space-between}
+    .game{font-weight:700}
+    .badge{font-size:11px;padding:2px 8px;border-radius:999px;border:1px solid #334155;color:#cbd5e1}
+    .badge.ok{background:#032712;border-color:#14532d;color:#86efac}
+    .badge.warn{background:#2b2105;border-color:#713f12;color:#fde68a}
+    .badge.muted{background:#0b1220}
+    .title2{font-weight:600;line-height:1.4}
+    .meta{color:var(--muted);font-size:12px}
+    .link{font-size:12px;color:#a5f3fc}
+    footer{margin:24px 0 8px;color:var(--muted);font-size:12px;display:flex;justify-content:space-between;align-items:center}
+    .hidden{display:none!important}
+  </style>
+  <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <div>
+        <div class="title">無料10連を開催中のソシャゲ一覧</div>
+        <div class="sub">今どのソシャゲが無料10連を開催中かをまとめて表示します</div>
+      </div>
+      <div class="controls">
+        <input id="q" class="search" placeholder="ゲーム名で検索…">
+        <label class="chip"><input id="onlyLive" type="checkbox" checked>開催中のみ</label>
+        <label class="chip"><input id="showUpcoming" type="checkbox" checked>予告も表示</label>
+        <label class="chip"><input id="showEnded" type="checkbox">終了も表示</label>
+      </div>
+    </header>
+
+    <div id="grid" class="grid"></div>
+
+    <footer>
+      <div id="count">0件</div>
+      <div id="updatedAt"></div>
+    </footer>
+  </div>
+
+<script>
+const SHEET_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vQhYbKPNRaDdwsH3W98ThNR0gkSBBFqz7wWakhcGmJLO9L5xwR9oqX70rM4a32A9OF5T77sdQ7l36qk/pub?gid=168145783&single=true&output=csv"; // ← ここにCSVの公開URLを貼る
+
+// ユーティリティ：JST扱いでDateを作る（"YYYY-MM-DD HH:mm" or ISO8601可）
+function parseJST(s){
+  if(!s) return null;
+  const hasTZ = /Z|[\+\-]\d\d:\d\d$/.test(s);
+  if(hasTZ) return new Date(s);
+  // "YYYY-MM-DD HH:mm" → "YYYY-MM-DDTHH:mm:00+09:00"
+  if(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/.test(s)){
+    return new Date(s.replace(" ", "T") + ":00+09:00");
+  }
+  // 最後の手段：そのままDateに投げる
+  return new Date(s);
+}
+function fmtJST(d){
+  if(!d) return "";
+  return new Intl.DateTimeFormat("ja-JP",{
+    timeZone:"Asia/Tokyo", year:"numeric", month:"2-digit", day:"2-digit",
+    hour:"2-digit", minute:"2-digit"
+  }).format(d);
+}
+function statusOf(start, end, now){
+  if(!start || !end) return "unknown";
+  if(start <= now && now <= end) return "live";
+  if(now < start) return "upcoming";
+  return "ended";
+}
+function labelStatus(st){
+  if(st==="live") return ["開催中","ok"];
+  if(st==="upcoming") return ["予告","warn"];
+  if(st==="ended") return ["終了","muted"];
+  return ["不明","muted"];
+}
+function labelPull(row){
+  const total = Number(row.pullTotal||0);
+  if(row.pullType==="10x_per_day" && total) return `毎日10連（最大${total}連）`;
+  if(total) return `合計${total}連`;
+  return "無料10連";
+}
+
+function render(rows){
+  const grid = document.getElementById("grid");
+  const q = (document.getElementById("q").value||"").toLowerCase();
+  const onlyLive = document.getElementById("onlyLive").checked;
+  const showUpcoming = document.getElementById("showUpcoming").checked;
+  const showEnded = document.getElementById("showEnded").checked;
+
+  const now = new Date(); // ブラウザ現地時刻だが比較はISO(+09:00化)でOK
+
+  let items = rows.map(r => {
+    const start = parseJST(r.startAtJST);
+    const end = parseJST(r.endAtJST);
+    const st = statusOf(start, end, now);
+    return {...r, start, end, st};
+  });
+
+  // フィルタ
+  items = items.filter(it => {
+    if(q && !(it.game||"").toLowerCase().includes(q)) return false;
+    if(onlyLive && it.st!=="live") return false;
+    if(!showUpcoming && it.st==="upcoming") return false;
+    if(!showEnded && it.st==="ended") return false;
+    return true;
+  });
+
+  // 並び順：開催中 → 予告(開始が近い順) → 終了(終了が新しい順)
+  items.sort((a,b)=>{
+    const rank = s => s==="live" ? 0 : s==="upcoming" ? 1 : 2;
+    const ra = rank(a.st), rb = rank(b.st);
+    if(ra !== rb) return ra - rb;
+    if(a.st==="upcoming" && b.st==="upcoming") return a.start - b.start;
+    if(a.st==="ended" && b.st==="ended") return b.end - a.end;
+    return a.start - b.start;
+  });
+
+  grid.innerHTML = "";
+  for(const it of items){
+    const [label, cls] = labelStatus(it.st);
+    const card = document.createElement("article");
+    card.className = "card";
+    card.innerHTML = `
+      <div class="top">
+        <div class="game">${escapeHtml(it.game||"")}</div>
+        <span class="badge ${cls}">${label}</span>
+      </div>
+      <div class="title2">${escapeHtml(it.title||"")}</div>
+      <div class="meta">${fmtJST(it.start)} 〜 ${fmtJST(it.end)}（JST）</div>
+      <div class="meta">${labelPull(it)} / ${(it.platforms||"").replaceAll("|", "・")}</div>
+      ${it.sourceUrl ? `<a class="link" href="${it.sourceUrl}" target="_blank" rel="noopener">公式ソースを見る →</a>` : ""}
+    `;
+    grid.appendChild(card);
+  }
+
+  document.getElementById("count").textContent = `${items.length}件`;
+  document.getElementById("updatedAt").textContent = `最終更新: ${fmtJST(new Date())}`;
+}
+function escapeHtml(s){
+  return s.replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+}
+
+async function load(){
+  try{
+    const res = await fetch(SHEET_CSV_URL, {cache:"no-store"});
+    if(!res.ok) throw new Error("CSVの取得に失敗しました");
+    const csvText = await res.text();
+    const parsed = Papa.parse(csvText, {header:true, skipEmptyLines:true});
+    if(parsed.errors?.length){
+      console.warn("CSV parse errors:", parsed.errors);
+    }
+    const rows = parsed.data;
+    window.__rows = rows;
+    render(rows);
+  }catch(e){
+    console.error(e);
+    document.getElementById("grid").innerHTML = "<div style='color:#fca5a5'>データの読み込みでエラーが発生しました。READMEの手順を確認してください。</div>";
+  }
+}
+
+addEventListener("DOMContentLoaded", () => {
+  document.getElementById("q").addEventListener("input", ()=> render(window.__rows||[]));
+  document.getElementById("onlyLive").addEventListener("change", ()=> render(window.__rows||[]));
+  document.getElementById("showUpcoming").addEventListener("change", ()=> render(window.__rows||[]));
+  document.getElementById("showEnded").addEventListener("change", ()=> render(window.__rows||[]));
+  load();
+});
+</script>
+</body>
+</html>
